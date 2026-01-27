@@ -1,7 +1,8 @@
 // ==========================================
-// WEBHOOK RECEIVER DARI SOCIABUZZ
+// WEBHOOK RECEIVER DARI SOCIABUZZ - FIXED VERSION
 // Menggunakan Vercel KV untuk persistent storage
 // ==========================================
+
 import { kv } from '@vercel/kv';
 
 const MAX_HISTORY = 50;
@@ -15,7 +16,7 @@ export default async function handler(req, res) {
   if (req.method === 'OPTIONS') {
     return res.status(200).end();
   }
-
+  
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed' });
   }
@@ -41,6 +42,7 @@ export default async function handler(req, res) {
 
     // ========== EXTRACT DATA ==========
     const body = req.body || {};
+    
     const donationId = body.id || `donation_${Date.now()}`;
     const donatorName = body.supporter || body.supporter_name || body.name || 'Anonymous';
     const amount = parseInt(body.amount || body.amount_settled || 0);
@@ -72,7 +74,7 @@ export default async function handler(req, res) {
 
     // Simpan donation individual (untuk duplikasi check)
     await kv.set(`donation:${donationId}`, donation, { ex: CACHE_TTL });
-
+    
     // Update LAST DONATION (yang dipake Roblox)
     await kv.set('latest_donation', donation);
 
