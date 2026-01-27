@@ -1,12 +1,16 @@
 // ==========================================
-// WEBHOOK RECEIVER DARI SOCIABUZZ - FIXED VERSION
-// Menggunakan Vercel KV untuk persistent storage
+// WEBHOOK RECEIVER - FIXED VERSION
+// With test mode for duplicate donations
 // ==========================================
 
 import { kv } from '@vercel/kv';
 
 const MAX_HISTORY = 50;
-const CACHE_TTL = 86400; // 24 jam (detik)
+const CACHE_TTL = 86400; // 24 hours
+
+// ⚠️ SET TRUE UNTUK TESTING (allow duplicates)
+// ⚠️ SET FALSE UNTUK PRODUCTION (prevent duplicates)
+const TEST_MODE = true;
 
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -52,15 +56,28 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: 'Missing donation ID' });
     }
 
-    // ========== CEK DUPLIKASI DI KV ==========
-    const existingDonation = await kv.get(`donation:${donationId}`);
-    
-    if (existingDonation) {
-      console.log(`[SKIP] Duplicate: ${donationId}`);
-      return res.status(200).json({ 
-        status: 'ok', 
-        message: 'Already processed' 
-      });
+    console.log('==========================================');
+    console.log('[WEBHOOK RECEIVED]');
+    console.log('ID:', donationId);
+    console.log('Donator:', donatorName);
+    console.log('Amount:', amount);
+    console.log('Message:', message);
+    console.log('Test Mode:', TEST_MODE ? 'ON' : 'OFF');
+    console.log('==========================================');
+
+    // ========== CEK DUPLIKASI (SKIP JIKA TEST MODE) ==========
+    if (!TEST_MODE) {
+      const existingDonation = await kv.get(`donation:${donationId}`);
+      
+      if (existingDonation) {
+        console.log(`[SKIP] Duplicate: ${donationId}`);
+        return res.status(200).json({ 
+          status: 'ok', 
+          message: 'Already processed (duplicate)' 
+        });
+      }
+    } else {
+      console.log('[TEST MODE] Skipping duplicate check');
     }
 
     // ========== SIMPAN DONASI ==========
@@ -75,22 +92,18 @@ export default async function handler(req, res) {
     // Simpan donation individual (untuk duplikasi check)
     await kv.set(`donation:${donationId}`, donation, { ex: CACHE_TTL });
     
-    // Update LAST DONATION (yang dipake Roblox)
+    // ⚠️ UPDATE LAST DONATION (INI YANG DIBACA ROBLOX!)
     await kv.set('latest_donation', donation);
+    console.log('[✅] Updated latest_donation in KV');
 
     // ========== UPDATE HISTORY ==========
-    // Ambil history lama
     let history = await kv.get('donation_history') || [];
-    
-    // Tambah donation baru di depan
     history.unshift(donation);
     
-    // Limit ke 50
     if (history.length > MAX_HISTORY) {
       history = history.slice(0, MAX_HISTORY);
     }
     
-    // Simpan history
     await kv.set('donation_history', history, { ex: CACHE_TTL });
 
     // ========== UPDATE LEADERBOARD ==========
@@ -98,19 +111,19 @@ export default async function handler(req, res) {
     const currentTotal = await kv.get(leaderboardKey) || 0;
     await kv.set(leaderboardKey, currentTotal + amount);
 
-    console.log(`[✅ SUCCESS] NEW DONATION!`);
-    console.log(`[✅] Donator: ${donatorName}`);
-    console.log(`[✅] Amount: Rp${amount}`);
-    console.log(`[✅] Message: "${message}"`);
+    console.log(`[✅ SUCCESS] Donation stored!`);
+    console.log(`[✅] Latest donation updated for Roblox polling`);
 
     return res.status(200).json({ 
       status: 'ok',
       donation_id: donationId,
       message: 'Donation received and stored',
+      test_mode: TEST_MODE,
       data: {
         donator: donatorName,
         amount: amount,
-        message: message
+        message: message,
+        timestamp: donation.timestamp
       }
     });
 
