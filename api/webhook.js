@@ -1,16 +1,12 @@
 // ==========================================
-// WEBHOOK RECEIVER - FIXED VERSION
-// With test mode for duplicate donations
+// SOCIABUZZ WEBHOOK - PUSH BASED
+// Real-time notification via queue system
 // ==========================================
 
 import { kv } from '@vercel/kv';
 
 const MAX_HISTORY = 50;
-const CACHE_TTL = 86400; // 24 hours
-
-// ⚠️ SET TRUE UNTUK TESTING (allow duplicates)
-// ⚠️ SET FALSE UNTUK PRODUCTION (prevent duplicates)
-const TEST_MODE = true;
+const CACHE_TTL = 86400; // 24 jam
 
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -30,7 +26,7 @@ export default async function handler(req, res) {
     const expectedToken = process.env.WEBHOOK_TOKEN;
     
     if (!expectedToken) {
-      console.error('[CRITICAL] WEBHOOK_TOKEN not configured');
+      console.error('[ERROR] WEBHOOK_TOKEN not set');
       return res.status(500).json({ error: 'Server misconfigured' });
     }
 
@@ -40,63 +36,61 @@ export default async function handler(req, res) {
       req.headers['sb-webhook-token'];
 
     if (!receivedToken || receivedToken !== expectedToken) {
-      console.warn('[SECURITY] Invalid or missing token');
+      console.warn('[UNAUTHORIZED] Invalid token');
       return res.status(401).json({ error: 'Unauthorized' });
     }
 
     // ========== EXTRACT DATA ==========
     const body = req.body || {};
     
-    const donationId = body.id || `donation_${Date.now()}`;
+    // PENTING: Gunakan timestamp sebagai unique identifier
+    const timestamp = Math.floor(Date.now() / 1000);
+    const donationId = body.id || `donation_${timestamp}`;
+    const uniqueKey = `${donationId}_${timestamp}`; // ID + timestamp = truly unique
+    
     const donatorName = body.supporter || body.supporter_name || body.name || 'Anonymous';
     const amount = parseInt(body.amount || body.amount_settled || 0);
     const message = body.message || body.note || '';
 
-    if (!donationId) {
-      return res.status(400).json({ error: 'Missing donation ID' });
-    }
-
     console.log('==========================================');
-    console.log('[WEBHOOK RECEIVED]');
-    console.log('ID:', donationId);
+    console.log('[NEW DONATION WEBHOOK]');
+    console.log('Unique Key:', uniqueKey);
+    console.log('Sociabuzz ID:', donationId);
     console.log('Donator:', donatorName);
     console.log('Amount:', amount);
     console.log('Message:', message);
-    console.log('Test Mode:', TEST_MODE ? 'ON' : 'OFF');
+    console.log('Timestamp:', timestamp);
     console.log('==========================================');
 
-    // ========== CEK DUPLIKASI (SKIP JIKA TEST MODE) ==========
-    if (!TEST_MODE) {
-      const existingDonation = await kv.get(`donation:${donationId}`);
-      
-      if (existingDonation) {
-        console.log(`[SKIP] Duplicate: ${donationId}`);
-        return res.status(200).json({ 
-          status: 'ok', 
-          message: 'Already processed (duplicate)' 
-        });
-      }
-    } else {
-      console.log('[TEST MODE] Skipping duplicate check');
-    }
-
-    // ========== SIMPAN DONASI ==========
+    // ========== CREATE DONATION OBJECT ==========
     const donation = {
-      id: donationId,
+      id: uniqueKey, // Unique ID = sociabuzz_id + timestamp
+      sociabuzz_id: donationId, // Original ID dari Sociabuzz
       donator: donatorName,
       amount: amount,
       message: message,
-      timestamp: Math.floor(Date.now() / 1000)
+      timestamp: timestamp
     };
 
-    // Simpan donation individual (untuk duplikasi check)
-    await kv.set(`donation:${donationId}`, donation, { ex: CACHE_TTL });
+    // ========== TAMBAHKAN KE QUEUE (untuk Roblox pickup) ==========
+    // Roblox akan ambil dari queue ini secara FIFO
+    const queueKey = 'donation_queue';
+    let queue = await kv.get(queueKey) || [];
     
-    // ⚠️ UPDATE LAST DONATION (INI YANG DIBACA ROBLOX!)
-    await kv.set('latest_donation', donation);
-    console.log('[✅] Updated latest_donation in KV');
+    queue.push(donation);
+    
+    // Limit queue size
+    if (queue.length > 100) {
+      queue = queue.slice(-100); // Keep last 100
+    }
+    
+    await kv.set(queueKey, queue, { ex: CACHE_TTL });
+    console.log('[✅] Added to queue. Queue size:', queue.length);
 
-    // ========== UPDATE HISTORY ==========
+    // ========== UPDATE LATEST DONATION (fallback untuk polling) ==========
+    await kv.set('latest_donation', donation);
+
+    // ========== SAVE TO HISTORY ==========
     let history = await kv.get('donation_history') || [];
     history.unshift(donation);
     
@@ -111,25 +105,30 @@ export default async function handler(req, res) {
     const currentTotal = await kv.get(leaderboardKey) || 0;
     await kv.set(leaderboardKey, currentTotal + amount);
 
-    console.log(`[✅ SUCCESS] Donation stored!`);
-    console.log(`[✅] Latest donation updated for Roblox polling`);
+    // ========== INCREMENT NOTIFICATION COUNTER ==========
+    // Roblox akan monitor counter ini untuk tahu ada donasi baru
+    const notifCount = await kv.incr('notification_counter');
+    console.log('[✅] Notification counter:', notifCount);
+
+    console.log('[✅] Donation processed successfully');
 
     return res.status(200).json({ 
       status: 'ok',
-      donation_id: donationId,
-      message: 'Donation received and stored',
-      test_mode: TEST_MODE,
+      unique_id: uniqueKey,
+      sociabuzz_id: donationId,
+      queue_position: queue.length,
+      notification_counter: notifCount,
       data: {
         donator: donatorName,
         amount: amount,
         message: message,
-        timestamp: donation.timestamp
+        timestamp: timestamp
       }
     });
 
   } catch (error) {
-    console.error('[❌ ERROR]', error.message);
-    console.error('[❌ STACK]', error.stack);
+    console.error('[ERROR]', error.message);
+    console.error(error.stack);
     
     return res.status(500).json({ 
       error: 'Internal server error',
