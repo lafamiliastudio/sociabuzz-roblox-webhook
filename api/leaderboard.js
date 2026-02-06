@@ -1,6 +1,6 @@
 import { kv } from '@vercel/kv';
 
-const MAX_LEADERBOARD = 10;
+const MAX_LEADERBOARD = 100;
 
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
