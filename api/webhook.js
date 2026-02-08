@@ -1,6 +1,6 @@
 // ==========================================
-// SOCIABUZZ WEBHOOK - PUSH BASED
-// Real-time notification via queue system
+// SOCIABUZZ WEBHOOK - OPTIMIZED WITH ZSET
+// Redis command reduction: ZINCRBY instead of GET+SET
 // ==========================================
 
 import { kv } from '@vercel/kv';
@@ -43,10 +43,9 @@ export default async function handler(req, res) {
     // ========== EXTRACT DATA ==========
     const body = req.body || {};
     
-    // PENTING: Gunakan timestamp sebagai unique identifier
     const timestamp = Math.floor(Date.now() / 1000);
     const donationId = body.id || `donation_${timestamp}`;
-    const uniqueKey = `${donationId}_${timestamp}`; // ID + timestamp = truly unique
+    const uniqueKey = `${donationId}_${timestamp}`;
     
     const donatorName = body.supporter || body.supporter_name || body.name || 'Anonymous';
     const amount = parseInt(body.amount || body.amount_settled || 0);
@@ -64,30 +63,28 @@ export default async function handler(req, res) {
 
     // ========== CREATE DONATION OBJECT ==========
     const donation = {
-      id: uniqueKey, // Unique ID = sociabuzz_id + timestamp
-      sociabuzz_id: donationId, // Original ID dari Sociabuzz
+      id: uniqueKey,
+      sociabuzz_id: donationId,
       donator: donatorName,
       amount: amount,
       message: message,
       timestamp: timestamp
     };
 
-    // ========== TAMBAHKAN KE QUEUE (untuk Roblox pickup) ==========
-    // Roblox akan ambil dari queue ini secara FIFO
+    // ========== TAMBAHKAN KE QUEUE ==========
     const queueKey = 'donation_queue';
     let queue = await kv.get(queueKey) || [];
     
     queue.push(donation);
     
-    // Limit queue size
     if (queue.length > 100) {
-      queue = queue.slice(-100); // Keep last 100
+      queue = queue.slice(-100);
     }
     
     await kv.set(queueKey, queue, { ex: CACHE_TTL });
     console.log('[✅] Added to queue. Queue size:', queue.length);
 
-    // ========== UPDATE LATEST DONATION (fallback untuk polling) ==========
+    // ========== UPDATE LATEST DONATION ==========
     await kv.set('latest_donation', donation);
 
     // ========== SAVE TO HISTORY ==========
@@ -100,13 +97,12 @@ export default async function handler(req, res) {
     
     await kv.set('donation_history', history, { ex: CACHE_TTL });
 
-    // ========== UPDATE LEADERBOARD ==========
-    const leaderboardKey = `leaderboard:${donatorName}`;
-    const currentTotal = await kv.get(leaderboardKey) || 0;
-    await kv.set(leaderboardKey, currentTotal + amount);
+    // ========== UPDATE LEADERBOARD (OPTIMIZED) ==========
+    // ✅ ZINCRBY: 1 command instead of GET + SET (2 commands)
+    await kv.zincrby('leaderboard', amount, donatorName);
+    console.log('[✅] Updated leaderboard via ZINCRBY');
 
     // ========== INCREMENT NOTIFICATION COUNTER ==========
-    // Roblox akan monitor counter ini untuk tahu ada donasi baru
     const notifCount = await kv.incr('notification_counter');
     console.log('[✅] Notification counter:', notifCount);
 
