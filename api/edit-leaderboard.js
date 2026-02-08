@@ -1,3 +1,8 @@
+// ==========================================
+// EDIT LEADERBOARD - OPTIMIZED WITH ZSET
+// Redis command reduction: No SCAN needed
+// ==========================================
+
 import { kv } from '@vercel/kv';
 
 export default async function handler(req, res) {
@@ -39,11 +44,11 @@ export default async function handler(req, res) {
     console.log('New Name:', new_name);
     console.log('==========================================');
 
-    // ========== GET OLD TOTAL ==========
-    const oldKey = `leaderboard:${old_name}`;
-    const oldTotal = await kv.get(oldKey);
+    // ========== GET OLD TOTAL (OPTIMIZED) ==========
+    // ✅ ZSCORE: Direct lookup, no SCAN needed
+    const oldTotal = await kv.zscore('leaderboard', old_name);
 
-    if (!oldTotal || oldTotal === 0) {
+    if (oldTotal === null || oldTotal === undefined) {
       return res.status(404).json({ 
         error: 'Donator not found',
         name: old_name
@@ -53,18 +58,19 @@ export default async function handler(req, res) {
     console.log('[INFO] Found', old_name, 'with total:', oldTotal);
 
     // ========== CHECK IF NEW NAME EXISTS ==========
-    const newKey = `leaderboard:${new_name}`;
-    const existingTotal = await kv.get(newKey) || 0;
+    const existingTotal = await kv.zscore('leaderboard', new_name) || 0;
 
-    // ========== MERGE OR REPLACE ==========
+    // ========== MERGE OR REPLACE (OPTIMIZED) ==========
     const finalTotal = existingTotal + oldTotal;
     
-    await kv.set(newKey, finalTotal);
-    console.log('[✅] Set', new_name, 'total to:', finalTotal);
+    // ✅ ZINCRBY: Add old total to new name (handles merge automatically)
+    await kv.zincrby('leaderboard', oldTotal, new_name);
+    console.log('[✅] Updated', new_name, 'total to:', finalTotal);
 
     // ========== DELETE OLD ENTRY ==========
-    await kv.del(oldKey);
-    console.log('[✅] Deleted old entry:', old_name);
+    // ✅ ZREM: Remove old member from sorted set
+    await kv.zrem('leaderboard', old_name);
+    console.log('[✅] Removed old entry:', old_name);
 
     // ========== UPDATE HISTORY ==========
     const editHistory = await kv.get('leaderboard_edit_history') || [];
@@ -72,7 +78,8 @@ export default async function handler(req, res) {
       old_name: old_name,
       new_name: new_name,
       old_total: oldTotal,
-      new_total: finalTotal,
+      existing_total: existingTotal,
+      final_total: finalTotal,
       merged: existingTotal > 0,
       timestamp: Math.floor(Date.now() / 1000)
     });
