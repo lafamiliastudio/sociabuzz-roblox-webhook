@@ -1,3 +1,8 @@
+// ==========================================
+// LEADERBOARD ENDPOINT - OPTIMIZED WITH ZSET
+// Redis command reduction: 1 command instead of 100+
+// ==========================================
+
 import { kv } from '@vercel/kv';
 
 const MAX_LEADERBOARD = 100;
@@ -16,37 +21,38 @@ export default async function handler(req, res) {
   }
 
   try {
-    // Scan semua leaderboard keys
-    const keys = [];
-    let cursor = 0;
+    // ========== FETCH LEADERBOARD (OPTIMIZED) ==========
+    // ✅ BEFORE: SCAN (3 commands) + GET×100 = ~103 commands
+    // ✅ AFTER: ZREVRANGE WITHSCORES = 1 command 🎯
     
-    do {
-      const result = await kv.scan(cursor, { match: 'leaderboard:*', count: 100 });
-      cursor = result[0];
-      keys.push(...result[1]);
-    } while (cursor !== 0);
+    const results = await kv.zrange('leaderboard', 0, MAX_LEADERBOARD - 1, {
+      rev: true,
+      withScores: true
+    });
 
-    if (keys.length === 0) {
+    if (!results || results.length === 0) {
       return res.status(200).json([]);
     }
 
-    // Ambil semua values
+    // ========== TRANSFORM TO EXPECTED FORMAT ==========
+    // results format: [member1, score1, member2, score2, ...]
     const leaderboard = [];
     
-    for (const key of keys) {
-      const name = key.replace('leaderboard:', '');
-      const total = await kv.get(key);
+    for (let i = 0; i < results.length; i += 2) {
+      const name = results[i];
+      const total = results[i + 1];
       
-      if (total && total > 0) {
-        leaderboard.push({ name, total });
+      if (name && total > 0) {
+        leaderboard.push({ 
+          name, 
+          total: parseInt(total) 
+        });
       }
     }
 
-    // Sort dan limit
-    leaderboard.sort((a, b) => b.total - a.total);
-    const topList = leaderboard.slice(0, MAX_LEADERBOARD);
+    console.log('[✅] Fetched leaderboard with 1 command. Entries:', leaderboard.length);
 
-    return res.status(200).json(topList);
+    return res.status(200).json(leaderboard);
 
   } catch (error) {
     console.error('[ERROR]', error.message);
