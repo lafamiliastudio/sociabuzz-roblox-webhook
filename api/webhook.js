@@ -1,36 +1,40 @@
-// ==========================================
-// SOCIABUZZ WEBHOOK - OPTIMIZED WITH ZSET
-// Redis command reduction: ZINCRBY instead of GET+SET
-// ==========================================
-
-import { kv } from '@vercel/kv';
-
+const MAX_QUEUE = 100;
 const MAX_HISTORY = 50;
-const CACHE_TTL = 86400; // 24 jam
+const SHEET_NAMES = {
+  QUEUE: 'Queue',
+  LEADERBOARD: 'Leaderboard',
+  HISTORY: 'History',
+  META: 'Meta'
+};
+
+// Helper: Panggil Google Apps Script Web App
+async function callSheetAPI(sheetApiUrl, payload) {
+  const res = await fetch(sheetApiUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  });
+  if (!res.ok) throw new Error(`Sheet API error: ${res.status}`);
+  return res.json();
+}
 
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-  
-  if (req.method === 'OPTIONS') {
-    return res.status(200).end();
-  }
-  
-  if (req.method !== 'POST') {
-    return res.status(405).json({ error: 'Method not allowed' });
-  }
+
+  if (req.method === 'OPTIONS') return res.status(200).end();
+  if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
 
   try {
     // ========== TOKEN VALIDATION ==========
     const expectedToken = process.env.WEBHOOK_TOKEN;
-    
-    if (!expectedToken) {
-      console.error('[ERROR] WEBHOOK_TOKEN not set');
-      return res.status(500).json({ error: 'Server misconfigured' });
-    }
+    const sheetApiUrl = process.env.SHEET_API_URL; // URL Google Apps Script
 
-    const receivedToken = 
+    if (!expectedToken) return res.status(500).json({ error: 'Server misconfigured: no token' });
+    if (!sheetApiUrl) return res.status(500).json({ error: 'Server misconfigured: no SHEET_API_URL' });
+
+    const receivedToken =
       req.query.token ||
       req.body?.token ||
       req.headers['sb-webhook-token'];
@@ -42,26 +46,16 @@ export default async function handler(req, res) {
 
     // ========== EXTRACT DATA ==========
     const body = req.body || {};
-    
     const timestamp = Math.floor(Date.now() / 1000);
     const donationId = body.id || `donation_${timestamp}`;
     const uniqueKey = `${donationId}_${timestamp}`;
-    
+
     const donatorName = body.supporter || body.supporter_name || body.name || 'Anonymous';
     const amount = parseInt(body.amount || body.amount_settled || 0);
     const message = body.message || body.note || '';
 
-    console.log('==========================================');
-    console.log('[NEW DONATION WEBHOOK]');
-    console.log('Unique Key:', uniqueKey);
-    console.log('Sociabuzz ID:', donationId);
-    console.log('Donator:', donatorName);
-    console.log('Amount:', amount);
-    console.log('Message:', message);
-    console.log('Timestamp:', timestamp);
-    console.log('==========================================');
+    console.log('[NEW DONATION]', donatorName, amount, message);
 
-    // ========== CREATE DONATION OBJECT ==========
     const donation = {
       id: uniqueKey,
       sociabuzz_id: donationId,
@@ -71,64 +65,24 @@ export default async function handler(req, res) {
       timestamp: timestamp
     };
 
-    // ========== TAMBAHKAN KE QUEUE ==========
-    const queueKey = 'donation_queue';
-    let queue = await kv.get(queueKey) || [];
-    
-    queue.push(donation);
-    
-    if (queue.length > 100) {
-      queue = queue.slice(-100);
-    }
-    
-    await kv.set(queueKey, queue, { ex: CACHE_TTL });
-    console.log('[✅] Added to queue. Queue size:', queue.length);
+    // ========== KIRIM KE GOOGLE SHEETS ==========
+    const result = await callSheetAPI(sheetApiUrl, {
+      action: 'addDonation',
+      donation: donation
+    });
 
-    // ========== UPDATE LATEST DONATION ==========
-    await kv.set('latest_donation', donation);
+    console.log('[✅] Sheet updated:', result);
 
-    // ========== SAVE TO HISTORY ==========
-    let history = await kv.get('donation_history') || [];
-    history.unshift(donation);
-    
-    if (history.length > MAX_HISTORY) {
-      history = history.slice(0, MAX_HISTORY);
-    }
-    
-    await kv.set('donation_history', history, { ex: CACHE_TTL });
-
-    // ========== UPDATE LEADERBOARD (OPTIMIZED) ==========
-    // ✅ ZINCRBY: 1 command instead of GET + SET (2 commands)
-    await kv.zincrby('leaderboard', amount, donatorName);
-    console.log('[✅] Updated leaderboard via ZINCRBY');
-
-    // ========== INCREMENT NOTIFICATION COUNTER ==========
-    const notifCount = await kv.incr('notification_counter');
-    console.log('[✅] Notification counter:', notifCount);
-
-    console.log('[✅] Donation processed successfully');
-
-    return res.status(200).json({ 
+    return res.status(200).json({
       status: 'ok',
       unique_id: uniqueKey,
       sociabuzz_id: donationId,
-      queue_position: queue.length,
-      notification_counter: notifCount,
-      data: {
-        donator: donatorName,
-        amount: amount,
-        message: message,
-        timestamp: timestamp
-      }
+      notification_counter: result.notification_counter || 0,
+      data: { donator: donatorName, amount, message, timestamp }
     });
 
   } catch (error) {
     console.error('[ERROR]', error.message);
-    console.error(error.stack);
-    
-    return res.status(500).json({ 
-      error: 'Internal server error',
-      details: error.message 
-    });
+    return res.status(500).json({ error: 'Internal server error', details: error.message });
   }
 }
