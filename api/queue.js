@@ -21,8 +21,6 @@ export default async function handler(req, res) {
 
   try {
     if (req.method === 'GET') {
-      // ========== GET QUEUE ==========
-      // Tidak pakai long-polling! Roblox poll tiap 5-10 detik sudah cukup.
       const lastKnownCounter = parseInt(req.query.last_counter || '0');
 
       const result = await callSheetAPI(sheetApiUrl, {
@@ -31,9 +29,19 @@ export default async function handler(req, res) {
       });
 
       const currentCounter = result.notification_counter || 0;
+      const queue          = result.queue || [];
 
-      // Return 304 kalau tidak ada perubahan
-      if (currentCounter === lastKnownCounter && currentCounter > 0) {
+      // FIX: Kirim 304 hanya jika counter sama DAN queue benar-benar kosong.
+      // Sebelumnya: cek counter === lastKnown saja — ini salah karena bisa saja
+      // counter belum naik tapi masih ada item pending di queue (misalnya item
+      // yang stuck dari sesi sebelumnya atau cleanupStuckProcessing baru jalan).
+      // Juga skip 304 jika lastKnownCounter=0 (fresh start) supaya Roblox
+      // selalu dapat data lengkap saat pertama kali connect.
+      if (
+        lastKnownCounter > 0 &&
+        currentCounter === lastKnownCounter &&
+        queue.length === 0
+      ) {
         res.setHeader('ETag', currentCounter.toString());
         return res.status(304).end();
       }
@@ -42,14 +50,13 @@ export default async function handler(req, res) {
       res.setHeader('X-Notification-Counter', currentCounter.toString());
 
       return res.status(200).json({
-        queue: result.queue || [],
-        count: (result.queue || []).length,
+        queue:                queue,
+        count:                queue.length,
         notification_counter: currentCounter,
-        has_new_data: currentCounter > lastKnownCounter
+        has_new_data:         currentCounter > lastKnownCounter || queue.length > 0
       });
 
     } else if (req.method === 'POST') {
-      // ========== ACKNOWLEDGE PROCESSED ==========
       const processedIds = req.body?.processed_ids || [];
 
       if (processedIds.length === 0) {
@@ -62,8 +69,8 @@ export default async function handler(req, res) {
       });
 
       return res.status(200).json({
-        status: 'ok',
-        removed: result.removed || 0,
+        status:    'ok',
+        removed:   result.removed || 0,
         remaining: result.remaining || 0
       });
 
