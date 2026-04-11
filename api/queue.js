@@ -10,73 +10,39 @@ async function callSheetAPI(sheetApiUrl, payload) {
 
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
   res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
 
   if (req.method === 'OPTIONS') return res.status(200).end();
+  if (req.method !== 'GET') return res.status(405).json({ error: 'Method not allowed' });
 
   const sheetApiUrl = process.env.SHEET_API_URL;
   if (!sheetApiUrl) return res.status(500).json({ error: 'SHEET_API_URL not configured' });
 
   try {
-    if (req.method === 'GET') {
-      const lastKnownCounter = parseInt(req.query.last_counter || '0');
+    const lastKnownCounter = parseInt(req.query.last_counter || '0');
 
-      const result = await callSheetAPI(sheetApiUrl, {
-        action: 'getQueue',
-        last_counter: lastKnownCounter
-      });
+    const result         = await callSheetAPI(sheetApiUrl, {
+      action:       'getQueue',
+      last_counter: lastKnownCounter
+    });
 
-      const currentCounter = result.notification_counter || 0;
-      const queue          = result.queue || [];
+    const currentCounter = result.notification_counter || 0;
+    const queue          = result.queue || [];
 
-      // FIX: Kirim 304 hanya jika counter sama DAN queue benar-benar kosong.
-      // Sebelumnya: cek counter === lastKnown saja — ini salah karena bisa saja
-      // counter belum naik tapi masih ada item pending di queue (misalnya item
-      // yang stuck dari sesi sebelumnya atau cleanupStuckProcessing baru jalan).
-      // Juga skip 304 jika lastKnownCounter=0 (fresh start) supaya Roblox
-      // selalu dapat data lengkap saat pertama kali connect.
-      if (
-        lastKnownCounter > 0 &&
-        currentCounter === lastKnownCounter &&
-        queue.length === 0
-      ) {
-        res.setHeader('ETag', currentCounter.toString());
-        return res.status(304).end();
-      }
-
+    // 304 hanya jika counter sama DAN queue kosong DAN bukan fresh start
+    if (lastKnownCounter > 0 && currentCounter === lastKnownCounter && queue.length === 0) {
       res.setHeader('ETag', currentCounter.toString());
-      res.setHeader('X-Notification-Counter', currentCounter.toString());
-
-      return res.status(200).json({
-        queue:                queue,
-        count:                queue.length,
-        notification_counter: currentCounter,
-        has_new_data:         currentCounter > lastKnownCounter || queue.length > 0
-      });
-
-    } else if (req.method === 'POST') {
-      const processedIds = req.body?.processed_ids || [];
-
-      if (processedIds.length === 0) {
-        return res.status(400).json({ error: 'No processed_ids provided' });
-      }
-
-      const result = await callSheetAPI(sheetApiUrl, {
-        action: 'removeProcessed',
-        processed_ids: processedIds
-      });
-
-      return res.status(200).json({
-        status:    'ok',
-        removed:   result.removed || 0,
-        remaining: result.remaining || 0
-      });
-
-    } else {
-      return res.status(405).json({ error: 'Method not allowed' });
+      return res.status(304).end();
     }
+
+    res.setHeader('ETag', currentCounter.toString());
+    return res.status(200).json({
+      queue:                queue,
+      count:                queue.length,
+      notification_counter: currentCounter,
+      has_new_data:         currentCounter > lastKnownCounter || queue.length > 0
+    });
 
   } catch (error) {
     console.error('[ERROR]', error.message);
